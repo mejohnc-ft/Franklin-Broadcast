@@ -1,54 +1,66 @@
-# Discord Streaming Automation
+# Franklin Broadcast
 
-Portable bundle of the Discord browser streaming stack that was built and tested on `192.168.0.54`.
+Discord slash commands that put a video in front of a voice call. `/s-start <url>` tells a
+persistent browser worker to join the call, open the video, and share the tab with audio.
+`/s-swap`, `/s-play`, `/s-pause`, `/s-speed`, and `/s-stop` control it from there.
 
-This repo is split into three pieces:
+Franklin, my home-server agent, orchestrates the stream but never is the streaming identity. The
+worker signs in to Discord as its own account in a real browser profile, so no user token goes in
+any config file.
 
-- `browser-worker/`
-  - Persistent Chromium + Playwright worker
-  - noVNC virtual desktop
-  - Discord call join + tab share automation
-  - Stream control API on port `8096`
-- `franklin-bot/`
-  - Discord bot integration for `/s-start`, `/s-swap`, `/s-stop`, `/s-play`, `/s-pause`, `/s-speed`, `/s-status`
-- `mission-control/`
-  - Franklin Mission Control dashboard integration for the Ghost Stream Browser card
+## Why
 
-## Current operating model
+Discord bots can't screen-share. Watching something together meant one person sharing their own
+screen and tying up their machine for the whole call. This moves that job to a container on a
+server: it stays signed in and keeps the media tab focused, and anyone in the channel with the bot
+can start, swap, or stop the stream.
 
-- Persistent browser profile and pinned tabs
-- Dedicated Discord tab, Rumble tab, and broadcast tab
-- Browser worker resource profile:
-  - `4` vCPU
-  - `8 GiB` RAM
-  - `1 GiB` shared memory
-- AMD render device passthrough via `/dev/dri/renderD128`
-- Franklin orchestrates the worker; Franklin is not the screen-sharing identity
+## How it works
 
-## What is included
+```mermaid
+flowchart LR
+    you([Slash command in Discord]) --> bot[franklin-bot]
+    bot -- "HTTP :8096" --> api[Control API]
+    subgraph worker [browser-worker container]
+        api --> pw[Playwright + Chromium<br/>persistent profile]
+        pw --> x[Xvfb desktop]
+        x --> vnc[noVNC :6086<br/>manual sign-in]
+    end
+    pw -- joins call, shares tab --> discord([Discord voice channel])
+    mc[mission-control dashboard] -- status --> api
+```
 
-- Browser worker container files copied from the working local packaging tree
-- Franklin bot code plus Dockerfile
-- Mission Control dashboard files plus systemd unit example
-- Example service compose file and environment template in `deploy/`
+| Directory | What it is |
+|---|---|
+| `browser-worker/` | Chromium driven by Playwright on an Xvfb desktop, noVNC for manual control, and the control API (`/health`, `/status`, `/stream/start`, `/stream/swap`, `/stream/play`, `/stream/pause`, `/stream/speed`, `/stream/stop`) |
+| `franklin-bot/` | The Discord bot: the `/s-*` stream commands plus chat, voice (`/join`, `/ask`, `/say`), and status commands backed by a local LLM, STT, and TTS |
+| `mission-control/` | A dashboard card that shows the worker's state |
+| `deploy/` | An example compose file, a systemd unit, and `.env.example` |
 
-## What is not included
+The worker runs with 4 vCPU, 8 GiB RAM, and 1 GiB shared memory. An AMD render device
+(`/dev/dri/renderD128`) is passed through for video decode.
 
-- Live browser profile data
-- Discord tokens
-- Existing logs, screenshots, or temporary debug scripts
-- Host-specific secrets
+## Set up
 
-## Suggested deployment order
+1. Build and start the worker from `browser-worker/` (`docker compose up -d --build`).
+2. Restart it in manual-login mode, open `http://<host>:6086/vnc.html`, and sign the worker's
+   Discord account in once. The profile persists in `./data/profile`. See
+   [browser-worker/README.md](browser-worker/README.md).
+3. Copy `deploy/.env.example` to `.env`, set `DISCORD_TOKEN` for the bot application, and start
+   `franklin-bot/`.
+4. Optional: deploy `mission-control/` and wire services with the files in `deploy/`.
 
-1. Set up the browser worker from `browser-worker/`
-2. Log the worker browser into Discord manually once via noVNC
-3. Start the Franklin bot from `franklin-bot/`
-4. Deploy Mission Control from `mission-control/`
-5. Wire your host service manager using the files in `deploy/`
+## Security
 
-## Notes
+**Keep this on a private network.** The control API on `:8096` and noVNC on `:6086` have no
+authentication, and noVNC gives full control of a browser that is signed in to Discord. Bind them
+to localhost or a Tailscale interface, or put them behind an authenticating proxy. Don't expose
+them to the internet.
 
-- The worker expects a real Discord browser session, not a bot token, for the shared stream account.
-- AdGuard or other required browser extensions should be managed in the persisted browser profile on the target machine.
-- This repo preserves the current implementation state, including the YouTube watch-page normalization and the worker control API.
+The live browser profile, tokens, logs, and host secrets are not in this repository.
+`mission-control/` still has addresses from my own network in it; change them for yours.
+
+## Status
+
+This is a snapshot of a setup that runs on my home server, not a packaged product. It's shared as
+a reference. It handles YouTube and Rumble URLs, including YouTube watch-page normalization.
